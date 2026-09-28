@@ -3260,6 +3260,7 @@ function createLocalApiHandler({ queuePath }) {
 }
 
 module.exports = {
+  readQueueData,
   createLocalApiHandler,
   resolveAllowedInsforgeBaseUrl,
   resolveQueuePath,

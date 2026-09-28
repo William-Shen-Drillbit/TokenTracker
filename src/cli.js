@@ -30,6 +30,9 @@ async function run(argv) {
   }
 
   switch (command) {
+    case "team":
+      await require("./commands/team").cmdTeam(rest);
+      return;
     case "serve":
       await cmdServe(rest);
       return;
@@ -84,6 +87,7 @@ function printHelp() {
       "  npx tokentracker [--debug] device-login [--json] [--base-url <url>]",
       "  npx tokentracker [--debug] wrapped [--year 2026] [--json]",
       "  npx tokentracker sessions [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--format json|csv] [--out file] [--refresh] [--no-git]",
+      "  tokentracker team --help                                 Private GitHub team dashboard and sync",
       "",
       "Notes:",
       "  - init: consent first, local setup next, browser sign-in last.",
