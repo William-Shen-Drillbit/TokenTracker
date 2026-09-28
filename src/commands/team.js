@@ -125,6 +125,14 @@ async function installService(dir) {
   await require("../lib/fs").writeFileAtomic(destination, body, { mode: 0o600 });
   const domain = `gui/${process.getuid()}`;
   await team.runFile("launchctl", ["bootout", `${domain}/${LABEL}`]).catch(() => {});
+  // bootout can return before the job is gone. Wait for deregistration before
+  // bootstrap, otherwise repeat installation intermittently fails with EIO (5).
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const stillRegistered = await team.runFile("launchctl", ["print", `${domain}/${LABEL}`]).then(() => true, () => false);
+    if (!stillRegistered) break;
+    if (attempt === 19) throw new Error("Previous team service is still stopping; retry installation");
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
   await team.runFile("launchctl", ["bootstrap", domain, destination]);
   console.log(`Installed login service. Dashboard: http://127.0.0.1:${(await configAt(dir)).port}`);
 }
