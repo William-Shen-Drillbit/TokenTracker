@@ -38,3 +38,25 @@ test('Registry failure never falls back to GitHub, and retries preserve the snap
     assert.equal((await team.loadSnapshots(dir))[0].personId,'alice');
   } finally {await fs.rm(dir,{recursive:true,force:true});}
 });
+
+test('setup migrates local identity once, preserves history, and refuses a changed Registry owner', async()=>{
+  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'registry-migration-'));
+  const identity={personId:'11111111-1111-4111-8111-111111111111',machineId:'22222222-2222-4222-8222-222222222222',workspaceId:'33333333-3333-4333-8333-333333333333',attributeTypeId:'44444444-4444-4444-8444-444444444444',personName:'Alice',machineName:'Mac'};
+  const bridge=path.join(dir,'bridge.js');
+  const writeBridge=()=>fs.writeFile(bridge,`process.stdin.resume();process.stdin.on('end',()=>console.log(${JSON.stringify(JSON.stringify(identity))}));`);
+  try {
+    const old={personId:'alice',machineId:'machine',personName:'Alice',repo:'owner/data',port:7682,reportOwner:true};
+    await team.save(path.join(dir,'config.json'),old);
+    await team.save(path.join(dir,'snapshot.json'),fixture);
+    await writeBridge();
+    const setup=()=>require('../src/commands/team').cmdTeam(['setup','--dir',dir,'--registry-bridge',bridge,'--registry-python',process.execPath]);
+    await setup();await setup();
+    const config=JSON.parse(await fs.readFile(path.join(dir,'config.json'),'utf8'));
+    assert.equal(config.backend,'registry');assert.equal(config.repo,undefined);assert.equal(config.reportOwner,true);
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(dir,'pre-registry-config.json'),'utf8')),old);
+    assert.equal((await team.loadSnapshots(dir))[0].personId,identity.personId);
+    identity.personId='55555555-5555-4555-8555-555555555555';await writeBridge();
+    await assert.rejects(setup(),/different person/);
+    assert.deepEqual(JSON.parse(await fs.readFile(path.join(dir,'config.json'),'utf8')),config);
+  } finally {await fs.rm(dir,{recursive:true,force:true});}
+});
