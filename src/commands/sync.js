@@ -561,7 +561,7 @@ async function cmdSync(argv, context = {}) {
     // token unless the local API has already minted a replacement from the
     // user's current login session and passed it through the environment.
     // Ingest is a whole-row upsert per bucket key, making replay idempotent.
-    if (config && isLegacyInsforgeBaseUrl(config.baseUrl)) {
+    if (!opts.localOnly && config && isLegacyInsforgeBaseUrl(config.baseUrl)) {
       const priorQueueState = (await readJson(queueStatePath)) || {};
       // Prepare the replay exactly once. The note survives successful batches,
       // so retryable failures retain both their committed offset and backoff
@@ -3221,7 +3221,7 @@ async function cmdSync(argv, context = {}) {
       });
     }
 
-    if (runtime.deviceToken && runtime.baseUrl &&
+    if (!opts.localOnly && runtime.deviceToken && runtime.baseUrl &&
         (!isBackgroundLightweightSync || opts.publishAccount) &&
         (!autoUploadDecision || autoUploadDecision.allowed)) {
       uploadAttempted = true;
@@ -3367,7 +3367,7 @@ async function cmdSync(argv, context = {}) {
     // right after this function returns, which would kill an in-flight
     // request; the throttle makes it a network no-op on all but the first
     // sync of the day, and maybeSendHeartbeat never throws.
-    await maybeSendHeartbeat({ trackerDir });
+    if (!opts.localOnly) await maybeSendHeartbeat({ trackerDir });
   } finally {
     progress?.stop();
     await lock.release();
@@ -3387,6 +3387,7 @@ function parseArgs(argv) {
     publishAccount: false,
     allLocalSources: false,
     repairGrok: false,
+    localOnly: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -3404,6 +3405,7 @@ function parseArgs(argv) {
     else if (a === "--background" || a === "--lightweight") out.background = true;
     else if (a === "--publish-account") out.publishAccount = true;
     else if (a === "--all-local-sources") out.allLocalSources = true;
+    else if (a === "--local-only") out.localOnly = true;
     else if (a === "--repair-grok") out.repairGrok = true;
     else throw new Error(`Unknown option: ${a}`);
   }
