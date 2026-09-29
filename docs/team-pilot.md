@@ -1,3 +1,13 @@
+## Routine pilot
+
+The Registry installer enrolls with `setup --routine` and installs a dashboard-only
+service. `team routine-sync` collects and exchanges data only for the latest due
+10am America/Chicago date, including an overnight catch-up. A locked, per-machine
+receipt prevents repeat successful exchange on that date. Failed runs retain data
+and remain due for the next routine invocation. The dashboard never collects in
+routine mode. The shared routine is report-only for the fleet and installed only
+on the explicitly enrolled pilot machine. Slack reporting remains paused.
+
 # Team pilot
 
 Each enrolled computer collects retained local tool logs and exchanges allowlisted usage snapshots through [Dashlar Registry](https://registry.dashlar.com). Each computer serves its own localhost team dashboard and retains its cache offline. The shared `drillbit-team-usage` installer uses the existing Registry CLI, personal macOS Keychain credential, and registered machine identity. GitHub installs code and packages; new enrollment does not upload usage there. Existing GitHub enrollments remain compatible until deliberately migrated.

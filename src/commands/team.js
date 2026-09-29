@@ -79,6 +79,25 @@ async function prepareReport(dir, now = new Date()) {
   return file;
 }
 
+async function runRoutine(dir, { now = new Date(), sync = syncTeam } = {}) {
+  const config = await configAt(dir);
+  if (config.collectionMode !== "routine" || config.backend !== "registry") throw new Error("Routine enrollment with Registry is required");
+  const lock = await team.openLock(path.join(dir, "routine.lock"), { quietIfLocked: true });
+  if (!lock) return { busy: true };
+  try {
+    const file = path.join(dir, "routine-completed.json");
+    const receipt = await readJson(file);
+    if (receipt && (receipt.personId !== config.personId || receipt.machineId !== config.machineId)) throw new Error("Routine receipt belongs to a different enrollment");
+    const date = team.dueReport(now, receipt ? [receipt.date] : [], config.routineActivatedOn);
+    if (!date) return { skipped: true, reason: "No uncompleted Central date is due" };
+    const status = await sync(dir);
+    if (status.busy || status.errors?.length) return { date, ...status };
+    if (!["collectedAt", "uploadedAt", "downloadedAt"].every(key => Date.parse(status[key]) >= now.getTime())) throw new Error("Routine did not verify fresh collection and Registry exchange");
+    await team.save(file, { date, personId: config.personId, machineId: config.machineId, ...status });
+    return { date, completed: true, ...status };
+  } finally { await lock.release(); }
+}
+
 function localRequest(req, port) {
   const hosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
   if (!hosts.has(req.headers.host)) return false;
@@ -89,6 +108,7 @@ function localRequest(req, port) {
 
 async function serveTeam(dir, { worker = true } = {}) {
   const config = await configAt(dir);
+  worker = worker && config.collectionMode !== "routine";
   const port = config.port || PORT;
   const html = await fs.readFile(path.join(__dirname, "../lib/team-dashboard.html"));
   const server = http.createServer(async (req, res) => {
@@ -128,11 +148,12 @@ async function serveTeam(dir, { worker = true } = {}) {
   return { server, stop, tick };
 }
 
-async function installService(dir) {
+async function installService(dir, { worker = true } = {}) {
   if (process.platform !== "darwin") throw new Error("Automatic service installation currently supports macOS; run team serve on this platform");
   const xml = value => String(value).replace(/[<>&"']/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;", "'": "&apos;" })[c]);
   const destination = path.join(os.homedir(), "Library", "LaunchAgents", `${LABEL}.plist`);
   const args = [process.execPath, CLI, "team", "serve", "--dir", dir];
+  if (!worker || (await configAt(dir)).collectionMode === "routine") args.push("--no-worker");
   const body = `<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd"><plist version="1.0"><dict><key>Label</key><string>${LABEL}</string><key>ProgramArguments</key><array>${args.map(a => `<string>${xml(a)}</string>`).join("")}</array><key>RunAtLoad</key><true/><key>KeepAlive</key><true/><key>ThrottleInterval</key><integer>30</integer><key>WorkingDirectory</key><string>${xml(path.dirname(CLI))}</string><key>EnvironmentVariables</key><dict><key>PATH</key><string>${xml(process.env.PATH || "/usr/bin:/bin:/usr/local/bin:/opt/homebrew/bin")}</string></dict><key>StandardOutPath</key><string>${xml(path.join(dir, "service.log"))}</string><key>StandardErrorPath</key><string>${xml(path.join(dir, "service-error.log"))}</string></dict></plist>`;
   await fs.mkdir(path.dirname(destination), { recursive: true });
   await team.save(path.join(dir, "service.json"), { label: LABEL, command: args });
@@ -155,12 +176,12 @@ async function cmdTeam(argv) {
   const { values: v, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     help: { type: "boolean" }, repo: { type: "string" }, name: { type: "string" }, dir: { type: "string" }, port: { type: "string" },
     "registry-bridge": { type: "string" }, "registry-python": { type: "string" },
-    "report-owner": { type: "boolean" }, "no-worker": { type: "boolean" }, "no-collect": { type: "boolean" },
+    "report-owner": { type: "boolean" }, "no-worker": { type: "boolean" }, "no-collect": { type: "boolean" }, "routine": { type: "boolean" },
     from: { type: "string" }, to: { type: "string" }, date: { type: "string" }, account: { type: "string" }, "weekly-usd": { type: "string" }, "message-url": { type: "string" },
   } });
   const dir = path.resolve(v.dir || team.TEAM_DIR);
   const action = positionals[0];
-  if (v.help || !action) { console.log("tokentracker team setup --repo owner/private-data-repo --name 'Your name' [--report-owner]\ntokentracker team collect | sync | status | serve | install-service | report\ntokentracker team allowance --account ACCOUNT_ID --weekly-usd AMOUNT\ntokentracker team report-sent --date YYYY-MM-DD --message-url https://...slack.com/archives/...\nOptional: --dir PATH; serve --no-worker; sync --no-collect; report --from ISO --to ISO\nRegistry enrollment: setup --registry-bridge /absolute/registry_sync.py --registry-python /absolute/python3. Legacy --repo requires GitHub CLI/private repository access.\nPilot: macOS login service, metadata-only snapshots, account attribution and billing gaps remain explicit."); return; }
+  if (v.help || !action) { console.log("tokentracker team setup --repo owner/private-data-repo --name 'Your name' [--report-owner]\ntokentracker team collect | sync | routine-sync | status | serve | install-service | report\ntokentracker team allowance --account ACCOUNT_ID --weekly-usd AMOUNT\ntokentracker team report-sent --date YYYY-MM-DD --message-url https://...slack.com/archives/...\nOptional: --dir PATH; serve/install-service --no-worker; setup --routine; sync --no-collect; report --from ISO --to ISO\nRegistry enrollment: setup --registry-bridge /absolute/registry_sync.py --registry-python /absolute/python3. Legacy --repo requires GitHub CLI/private repository access.\nPilot: macOS login service, metadata-only snapshots, account attribution and billing gaps remain explicit."); return; }
   if (action === "setup") {
     const previous = await readJson(path.join(dir, "config.json"));
     if (v["registry-bridge"]) {
@@ -183,6 +204,7 @@ async function cmdTeam(argv) {
         const config = { ...previous, ...identity, backend: "registry", registryBridge, registryPython,
           personName: v.name || previous?.personName || identity.personName, port,
           reportOwner: previous?.reportOwner || false, activatedOn: previous?.activatedOn || team.centralDate().date, historyDays: previous?.historyDays || 90 };
+        if (v.routine) { config.collectionMode = "routine"; config.routineActivatedOn = previous?.routineActivatedOn || team.centralDate().date; }
         delete config.repo;
         const snapshot = await readJson(path.join(dir, "snapshot.json"));
         if (snapshot) {
@@ -229,9 +251,10 @@ async function cmdTeam(argv) {
     console.log(JSON.stringify({ collectedAt: snapshot.collectedAt, rows: snapshot.rows.length, accounts: snapshot.accounts.length, findings: snapshot.findings }, null, 2)); return;
   }
   if (action === "sync") { const status = await syncTeam(dir, { collect: !v["no-collect"] }); console.log(JSON.stringify(status, null, 2)); if (status.errors?.length) process.exitCode = 1; return; }
+  if (action === "routine-sync") { const status = await runRoutine(dir); console.log(JSON.stringify(status, null, 2)); if (status.busy || status.errors?.length) process.exitCode = 1; return; }
   if (action === "status") { console.log(JSON.stringify({ config: await configAt(dir), sync: await readJson(path.join(dir, "status.json")), machines: (await team.loadSnapshots(dir)).length }, null, 2)); return; }
   if (action === "serve") { const service = await serveTeam(dir, { worker: !v["no-worker"] }); process.once("SIGTERM", () => { service.stop(); process.exit(0); }); process.once("SIGINT", () => { service.stop(); process.exit(0); }); return; }
-  if (action === "install-service") { await installService(dir); return; }
+  if (action === "install-service") { await installService(dir, { worker: !v["no-worker"] }); return; }
   if (action === "report") {
     const summary = team.aggregate(await team.loadSnapshots(dir), { from: v.from, to: v.to });
     console.log(team.renderReport(summary, team.centralDate().date, `http://127.0.0.1:${(await configAt(dir)).port}`)); return;
@@ -249,4 +272,4 @@ async function cmdTeam(argv) {
   throw new Error(`Unknown team command: ${action}`);
 }
 
-module.exports = { cmdTeam, syncTeam, prepareReport, serveTeam, localRequest };
+module.exports = { cmdTeam, syncTeam, prepareReport, runRoutine, serveTeam, localRequest };
