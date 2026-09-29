@@ -214,7 +214,8 @@ async function collectSnapshot(config, dir = TEAM_DIR, now = new Date().toISOStr
 }
 
 async function loadSnapshots(dir = TEAM_DIR) {
-  const index = await readJson(path.join(dir, "remote-index.json")) || {};
+  const config = await readJson(path.join(dir, "config.json"));
+  const index = await readJson(path.join(dir, config?.backend === "registry" ? "registry-index.json" : "remote-index.json")) || {};
   const snapshots = new Map();
   for (const file of Object.keys(index)) {
     const raw = await readJson(path.join(dir, "cache", `${hash(file)}-${index[file]}.json`));
