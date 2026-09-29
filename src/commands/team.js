@@ -103,7 +103,7 @@ async function serveTeam(dir, { worker = true } = {}) {
         const summary = team.aggregate(await team.loadSnapshots(dir), { from: url.searchParams.get("from") || undefined, to: url.searchParams.get("to") || undefined });
         res.setHeader("Content-Type", "application/json");
         res.end(JSON.stringify({ ...summary, sync: await readJson(path.join(dir, "status.json")),
-          storageUrl: config.backend === "registry" ? "https://registry.dashlar.com/?entity=machine&displays=table" : config.repo ? `https://github.com/${config.repo}` : null,
+          storageUrl: config.backend === "registry" ? "https://registry.dashlar.com/?entity=machine&displays=table" : config.backend === "local" ? null : config.repo ? `https://github.com/${config.repo}` : null,
           storageLabel: config.backend === "registry" ? "Team Registry" : config.backend === "local" ? "Local collection only" : "Private data repository" })); return;
       }
       res.writeHead(404); res.end("Not found");
