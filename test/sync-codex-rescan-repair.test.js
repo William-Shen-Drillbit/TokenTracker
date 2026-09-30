@@ -2101,7 +2101,9 @@ describe("repairCodexInterleavedUsageInflation — cumulative lineage repair", (
         return realReaddir.call(this, target, ...args);
       };
       try {
-        await cmdSync(["--auto", "--background", "--all-local-sources"]);
+        // Ordinary refreshes stay lightweight. The personal collector's explicit
+        // all-local scan now revisits archives (covered by sync-background).
+        await cmdSync(["--auto", "--background"]);
       } finally {
         fs.readdir = realReaddir;
       }
@@ -2143,7 +2145,9 @@ describe("repairCodexInterleavedUsageInflation — cumulative lineage repair", (
         return realReaddir.call(this, target, ...args);
       };
       try {
-        await cmdSync(["--auto", "--background", "--all-local-sources"]);
+        // Ordinary refreshes stay lightweight. The personal collector's explicit
+        // all-local scan now revisits archives (covered by sync-background).
+        await cmdSync(["--auto", "--background"]);
       } finally {
         fs.readdir = realReaddir;
       }

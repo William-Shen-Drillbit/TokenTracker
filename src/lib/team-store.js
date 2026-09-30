@@ -37,6 +37,16 @@ function normalizeSnapshot(raw) {
     plan: a.plan ? text(a.plan) : null, planTier: a.planTier ? text(a.planTier) : null,
     allowanceWeeklyUsd: a.allowanceWeeklyUsd == null ? null : number(a.allowanceWeeklyUsd), ownership: ["company", "personal", "unknown"].includes(a.ownership) ? a.ownership : "unknown",
     observedAt: timestamp(a.observedAt),
+    identityId: a.identityId == null ? null : identifier(a.identityId),
+    organizationId: a.organizationId == null ? null : identifier(a.organizationId),
+    status: ["current", "historical", "observed"].includes(a.status) ? a.status : "observed",
+    evidence: a.evidence ? text(a.evidence) : null,
+  }));
+  if (!Array.isArray(raw.planObservations || []) || (raw.planObservations || []).length > 2000) throw new Error("Too many plan observations");
+  const planObservations = (raw.planObservations || []).map(o => ({
+    provider: text(o.provider), accountId: o.accountId == null ? null : identifier(o.accountId),
+    plan: o.plan ? text(o.plan) : null, planTier: o.planTier ? text(o.planTier) : null,
+    evidence: text(o.evidence), firstSeen: timestamp(o.firstSeen), lastSeen: timestamp(o.lastSeen),
   }));
   const ids = new Set(accounts.map(a => a.id));
   const rows = raw.rows.map(r => {
@@ -66,7 +76,7 @@ function normalizeSnapshot(raw) {
     version: 1, personId: identifier(raw.personId), personName: text(raw.personName),
     machineId: identifier(raw.machineId), machineName: text(raw.machineName),
     collectedAt: timestamp(raw.collectedAt), pricingRevision: text(String(raw.pricingRevision || "unknown")),
-    accounts, billing, rows,
+    accounts, planObservations, billing, rows,
     findings: (raw.findings || []).slice(0, 100).map(f => text(f, 500)),
   };
 }
@@ -149,46 +159,26 @@ async function downloadSnapshots(repo, dir, api = ghApi) {
 }
 
 async function discoverAccounts(home = os.homedir(), now = new Date().toISOString()) {
-  const found = new Map();
-  const roots = await fs.readdir(home, { withFileTypes: true });
-  const add = a => { if (a.email || a.id) { a.id = hash(`${a.provider}:${a.id || a.email}`); found.set(a.id, { ...a, ownership: "unknown", observedAt: now }); } };
-  for (const entry of roots) {
-    if (!entry.isDirectory()) continue;
-    if (/^\.codex(?:$|[-_])/.test(entry.name)) {
-      const auth = await readJson(path.join(home, entry.name, "auth.json"));
-      try {
-        const claims = JSON.parse(Buffer.from(auth.tokens.id_token.split(".")[1], "base64url").toString("utf8"));
-        const ns = claims["https://api.openai.com/auth"] || {};
-        add({ provider: "openai", id: auth.tokens.account_id || ns.chatgpt_account_id, email: claims.email || null, plan: ns.chatgpt_plan_type || null });
-      } catch { /* No readable OAuth identity. Never copy token fields. */ }
-    }
-    if (/^\.claude(?:$|[-_])/.test(entry.name)) {
-      const candidates = [path.join(home, entry.name, ".claude.json")];
-      if (entry.name === ".claude") candidates.push(path.join(home, ".claude.json"));
-      for (const candidate of candidates) {
-        const metadata = await readJson(candidate);
-        const a = metadata?.oauthAccount;
-        if (a) add({ provider: "anthropic", id: a.accountUuid, email: a.emailAddress || null, plan: a.subscriptionType || null });
-      }
-    }
-  }
-  const claude = require("./subscriptions").detectClaudeCodeSubscriptionDetails({ home });
-  const defaultClaude = await readJson(path.join(home, ".claude.json"));
-  const defaultId = defaultClaude?.oauthAccount?.accountUuid;
-  const account = defaultId && found.get(hash(`anthropic:${defaultId}`));
-  if (account && claude) { account.plan = claude.planType; account.planTier = claude.rateLimitTier; }
-  return [...found.values()];
+  return (await require("./team-account-inventory").discoverInventory({ home, now })).accounts;
 }
 
 async function collectSnapshot(config, dir = TEAM_DIR, now = new Date().toISOString()) {
   const { readQueueData, resolveQueuePath } = require("./local-api");
   const queuePath = config.queuePath || resolveQueuePath();
   await fs.access(queuePath); // Missing source is not zero usage.
-  const accounts = await discoverAccounts();
+  const previous = await readJson(path.join(dir, "snapshot.json")) || {};
+  const inventory = await require("./team-account-inventory").discoverInventory({ now, previous });
+  const accounts = inventory.accounts;
+  const resolveAccount = id => {
+    if (accounts.some(a => a.id === id)) return id;
+    const matches = accounts.filter(a => a.identityId === id);
+    return matches.length === 1 ? matches[0].id : null;
+  };
   const enrolled = await readJson(path.join(dir, "accounts.json")) || [];
   for (const a of enrolled) {
-    const index = accounts.findIndex(existing => existing.id === a.id);
-    if (index >= 0) accounts[index] = { ...accounts[index], ...a, observedAt: now };
+    const resolved = resolveAccount(a.id);
+    const index = accounts.findIndex(existing => existing.id === resolved);
+    if (index >= 0) accounts[index] = { ...accounts[index], ...a, id: resolved, observedAt: now };
     else accounts.push({ ...a, observedAt: now });
   }
   const since = Date.parse(now) - (config.historyDays || 90) * 86_400_000;
@@ -198,13 +188,23 @@ async function collectSnapshot(config, dir = TEAM_DIR, now = new Date().toISOStr
     const priced = pricing && Object.values(pricing).some(value => typeof value === "number" && value > 0);
     // Queue buckets do not retain provider-account identity. Never label old
     // usage with the account currently signed in. Explicit provenance wins.
-    const accountId = r.account_id && accounts.some(a => a.id === r.account_id) ? r.account_id : null;
+    const accountId = r.account_id ? resolveAccount(r.account_id) : null;
     return { source: r.source || "unknown", model: r.model || "unknown", hour_start: r.hour_start,
       accountId, ...Object.fromEntries(COUNTERS.map(k => [k, r[k] || 0])), estimatedUsd: priced ? computeRowCost(r) : null };
   });
+  const billing = await readJson(path.join(dir, "billing.json")) || [];
+  for (const b of billing) {
+    const resolved = resolveAccount(b.accountId);
+    if (resolved) b.accountId = resolved;
+    else if (!accounts.some(a => a.id === b.accountId)) {
+      const old = previous.accounts?.find(a => a.id === b.accountId);
+      if (old) accounts.push({ ...old, status: "historical", evidence: "billing-legacy-identity" });
+    }
+  }
   return normalizeSnapshot({ version: 1, personId: config.personId, personName: config.personName,
     machineId: config.machineId, machineName: config.machineName, collectedAt: now, pricingRevision: getPricingRevision(),
-    accounts, rows, billing: await readJson(path.join(dir, "billing.json")) || [], findings: [
+    accounts, planObservations: inventory.planObservations, rows, billing, findings: [
+      ...inventory.findings,
       "Account inventory describes observed sign-ins; historical usage without account identity remains unassigned.",
       "API-equivalent value is an estimate, not charges or overage. Missing billing is unknown.",
       "Coverage is retained local logs from supported tools; browser-only usage and undiscovered account directories may be absent.",
@@ -243,7 +243,7 @@ function planAllowance(account) {
 
 function estimateExcess(accounts, details, start, end) {
   const weeks = (end - start) / (7 * 86_400_000);
-  const results = accounts.map(a => ({ ...a, allowance: planAllowance(a), usageUsd: 0, tokens: 0, assumedTokens: 0, unpricedTokens: 0 }));
+  const results = accounts.map(a => ({ ...a, allowance: a.planAmbiguous ? null : planAllowance(a), usageUsd: 0, tokens: 0, assumedTokens: 0, unpricedTokens: 0 }));
   let unallocatedUsd = 0, unallocatedTokens = 0;
   for (const row of details) {
     const provider = { claude: "anthropic", codex: "openai" }[row.source];
@@ -268,7 +268,7 @@ function estimateExcess(accounts, details, start, end) {
     a.excessLowUsd = eligible ? Math.max(0, a.usageUsd - a.allowance.high * weeks) : null;
     a.excessHighUsd = eligible ? Math.max(0, a.usageUsd - a.allowance.low * weeks) : null;
     a.pricingAssumption = a.priceProxyUsd != null ? "Unknown models priced using the observed blended rate for this account" : a.unpricedTokens ? "Unpriced usage: no observed rate available" : "Model API prices";
-    a.assumption = a.assumedTokens ? "Historical usage assigned to the sole observed provider account; assumes this plan throughout the selected period" : "Usage retains account identity";
+    a.assumption = a.planAmbiguous ? "Conflicting plan history or legacy workspace identity prevents reliable allowance attribution; allowance and excess remain unknown" : a.assumedTokens ? "Historical usage assigned to the sole observed provider account; assumes this plan throughout the selected period" : "Usage retains account identity";
   }
   const known = results.filter(a => a.estimatedExcessUsd != null);
   return { accounts: results, estimatedExcessUsd: known.length ? known.reduce((n, a) => n + a.estimatedExcessUsd, 0) : null,
@@ -282,7 +282,7 @@ function aggregate(snapshots, { from, to, now = Date.now() } = {}) {
   const start = from ? Date.parse(from) : now - 30 * 86_400_000;
   const end = to ? Date.parse(to) : now;
   if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) throw new Error("Invalid date range");
-  const people = new Map(), details = [], accounts = new Map(), cycles = new Map();
+  const people = new Map(), details = [], accounts = new Map(), cycles = new Map(), observations = new Map();
   for (const raw of snapshots) {
     const s = normalizeSnapshot(raw);
     let person = people.get(s.personId);
@@ -292,6 +292,13 @@ function aggregate(snapshots, { from, to, now = Date.now() } = {}) {
     for (const a of s.accounts) {
       const key = `${s.personId}/${a.id}`;
       if (!accounts.has(key) || accounts.get(key).observedAt < a.observedAt) accounts.set(key, { ...a, personId: s.personId });
+    }
+    for (const o of s.planObservations) {
+      const key = [s.personId, o.provider, o.accountId, o.plan, o.planTier, o.evidence].join("|");
+      const old = observations.get(key);
+      observations.set(key, { ...o, personId: s.personId,
+        firstSeen: old && old.firstSeen < o.firstSeen ? old.firstSeen : o.firstSeen,
+        lastSeen: old && old.lastSeen > o.lastSeen ? old.lastSeen : o.lastSeen });
     }
     for (const b of s.billing) {
       // Cycle totals cannot be prorated into an arbitrary date filter.
@@ -309,13 +316,16 @@ function aggregate(snapshots, { from, to, now = Date.now() } = {}) {
     }
   }
   for (const b of cycles.values()) if (b.overageUsd != null) { const p = people.get(b.personId); p.reportedOverageUsd = (p.reportedOverageUsd || 0) + b.overageUsd; }
+  for (const a of accounts.values()) {
+    a.planAmbiguous = [...accounts.values()].some(other => other.personId === a.personId && other.id !== a.id && other.identityId === a.id) || [...observations.values()].some(o => o.personId === a.personId && o.provider === a.provider && ((o.plan && a.plan && o.plan !== a.plan) || (o.planTier && a.planTier && o.planTier !== a.planTier)) && (!o.accountId || o.accountId === a.id) && Date.parse(o.lastSeen) >= start && Date.parse(o.firstSeen) < end);
+  }
   const excess = estimateExcess([...accounts.values()], details, start, end);
   for (const p of people.values()) {
     const modeled = excess.accounts.filter(a => a.personId === p.id && a.estimatedExcessUsd != null);
     p.estimatedExcessUsd = modeled.length ? modeled.reduce((n, a) => n + a.estimatedExcessUsd, 0) : null;
   }
   const list = [...people.values()].sort((a, b) => (b.estimatedExcessUsd ?? -1) - (a.estimatedExcessUsd ?? -1));
-  return { excess, from: new Date(start).toISOString(), to: new Date(end).toISOString(), people: list, accounts: [...accounts.values()], billing: [...cycles.values()], details,
+  return { excess, from: new Date(start).toISOString(), to: new Date(end).toISOString(), people: list, accounts: [...accounts.values()], planObservations: [...observations.values()], billing: [...cycles.values()], details,
     totals: { people: list.length, tokens: list.reduce((n, p) => n + p.tokens, 0), estimatedUsd: list.reduce((n, p) => n + p.estimatedUsd, 0), reportedOverageUsd: list.some(p => p.reportedOverageUsd != null) ? list.reduce((n, p) => n + (p.reportedOverageUsd || 0), 0) : null },
     coverage: "Enrolled machines only. Billing totals cover the listed full cycles that overlap the date filter; estimates cover the selected timestamps. Unknown billing is not zero. Modeled allowances are prorated by the selected duration, not provider reset windows; unused allowance is not transferred across accounts." };
 }

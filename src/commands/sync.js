@@ -628,13 +628,13 @@ async function cmdSync(argv, context = {}) {
     // which would then erase the native history. The file-hash and
     // message-hash dedup layers make the union safe. Native is listed first
     // so the cross-environment file dedup keeps the native copy as primary.
-    const claudeNativeHome = path.join(home, ".claude");
+    const nativeProfileRoots = await require("../lib/team-account-inventory").profileRoots(home);
     const wslClaudeHome = process.platform === "win32" && wsl.shouldProbeWsl(process.env)
       ? wsl.discoverWslHome(".claude")
       : null;
     const claudeInstallHomes = [];
     if (process.platform !== "win32" || wsl.shouldProbeNative(process.env)) {
-      claudeInstallHomes.push(claudeNativeHome);
+      claudeInstallHomes.push(...nativeProfileRoots.claude);
     }
     if (wslClaudeHome) claudeInstallHomes.push(wslClaudeHome);
     const claudeProjectsDirs = claudeInstallHomes.map((h) => path.join(h, "projects"));
@@ -724,14 +724,22 @@ async function cmdSync(argv, context = {}) {
       });
       if (codexPaths.native) {
         sources.push({ source: "codex", sessionsDir: path.join(codexPaths.native, "sessions"), inventoryCacheKey: "codexDayInventoryCache" });
-        if (!isBackgroundLightweightSync || backgroundCodexUsageRepair) {
+        if (!isBackgroundLightweightSync || backgroundCodexUsageRepair || opts.allLocalSources) {
           sources.push({ source: "codex", sessionsDir: path.join(codexPaths.native, "archived_sessions"), deep: true });
         }
       }
       if (codexPaths.wsl) {
         sources.push({ source: "codex", sessionsDir: path.join(codexPaths.wsl, "sessions"), inventoryCacheKey: "codexDayInventoryCache" });
-        if (!isBackgroundLightweightSync || backgroundCodexUsageRepair) {
+        if (!isBackgroundLightweightSync || backgroundCodexUsageRepair || opts.allLocalSources) {
           sources.push({ source: "codex", sessionsDir: path.join(codexPaths.wsl, "archived_sessions"), deep: true });
+        }
+      }
+      if ((!isBackgroundLightweightSync || opts.allLocalSources) && (process.platform !== "win32" || wsl.shouldProbeNative(process.env))) {
+        const primaryRoot = codexPaths.native && await fs.realpath(codexPaths.native).catch(() => codexPaths.native);
+        for (const root of nativeProfileRoots.codex) {
+          if (root === primaryRoot) continue;
+          sources.push({ source: "codex", sessionsDir: path.join(root, "sessions"), inventoryCacheKey: "codexDayInventoryCache" });
+          if (!isBackgroundLightweightSync || opts.allLocalSources) sources.push({ source: "codex", sessionsDir: path.join(root, "archived_sessions"), deep: true });
         }
       }
     }

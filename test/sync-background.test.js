@@ -515,6 +515,28 @@ test("all-local background sync includes Claude while preserving lightweight beh
   });
 });
 
+test("all-local sync finds alternate personal profiles and archives without duplicating reruns", async () => {
+  await withTempSyncEnv(async (home) => {
+    const primary = await writeCodexRollout(process.env.CODEX_HOME, "2026-06-30", "019f16bd-1002-7000-8000-aaaaaaaaaaaa", 22);
+    const personal = path.join(home, ".codex-personal");
+    await writeCodexRollout(personal, "2026-06-30", "019f16bd-1002-7000-8000-bbbbbbbbbbbb", 33);
+    const archive = path.join(personal, "archived_sessions");
+    await fs.mkdir(archive, { recursive: true });
+    await fs.copyFile(primary, path.join(archive, path.basename(primary)));
+    await fs.writeFile(path.join(archive, "rollout-2026-06-30T00-00-00-019f16bd-1002-7000-8000-cccccccccccc.jsonl"), tokenCountLine({ ts: "2026-06-30T01:00:00Z", totalTokens: 44 }) + "\n");
+    await writeClaudeSession(home, "2026-06-30", "session-personal", 53);
+    await fs.rename(path.join(home, ".claude"), path.join(home, ".claude-personal"));
+    const totals = async () => {
+      const latest = new Map((await readQueue(home)).trim().split("\n").map(JSON.parse).map(r => [[r.source, r.model, r.hour_start].join("|"), r]));
+      return [...latest.values()].reduce((out, r) => { out[r.source] = (out[r.source] || 0) + r.total_tokens; return out; }, {});
+    };
+    await cmdSync(["--auto", "--background", "--all-local-sources"]);
+    assert.deepEqual(await totals(), { codex: 99, claude: 53 });
+    await cmdSync(["--auto", "--background", "--all-local-sources"]);
+    assert.deepEqual(await totals(), { codex: 99, claude: 53 });
+  });
+});
+
 test("all-local background sync includes Reasonix telemetry", async () => {
   await withTempSyncEnv(async (home) => {
     await writeReasonixTelemetry(home, "reasonix-all-local");
