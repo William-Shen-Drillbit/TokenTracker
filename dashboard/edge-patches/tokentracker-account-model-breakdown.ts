@@ -117,12 +117,17 @@ async function verifiedUserIdFromJwt(authHeader: string | null): Promise<string 
 // Keep this block byte-identical with leaderboard-refresh.ts; see feedback_model_pricing_sync.
 const MODEL_PRICING: Record<string, { input: number; output: number; cache_read: number; cache_write?: number }> = {
   // ── Anthropic Claude ──
+  // Official model rates verified 2026-10-01; launch sources in curated-overrides.json.
+  "claude-fable-5-1": { input: 10, output: 50, cache_read: 0.25, cache_write: 12.5 },
   "claude-fable-5": { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
+  "claude-opus-5-5": { input: 4, output: 20, cache_read: 0.2, cache_write: 5 },
   "claude-opus-5": { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
+  "claude-opus-5-5-fast": { input: 8, output: 40, cache_read: 0.4, cache_write: 10 },
   "claude-opus-5-fast": { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
   "claude-opus-4-6": { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
   "claude-opus-4-5-20250414": { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
-  "claude-sonnet-5": { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
+  "claude-sonnet-5-5": { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
+  "claude-sonnet-5": { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
   "claude-sonnet-4-6": { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
   "claude-sonnet-4-5-20250514": { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
   "claude-sonnet-4-20250514": { input: 3, output: 15, cache_read: 0.3, cache_write: 3.75 },
@@ -171,8 +176,9 @@ const MODEL_PRICING: Record<string, { input: number; output: number; cache_read:
   // Cloud buckets do not retain per-request context/service tier. Use the
   // standard short-context estimate; never infer long context from totals.
   "gpt-6-astra": { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
-  // GPT-6 Sol Standard USD/MTok, verified 2026-09-24:
-  // https://developers.openai.com/api/docs/models/gpt-6-sol
+  // https://developers.openai.com/api/docs/models/gpt-6.1-sol (2026-10-01)
+  "gpt-6.1-sol": { input: 2, output: 10, cache_read: 0.1, cache_write: 2.5 },
+  // https://developers.openai.com/api/docs/models/gpt-6-sol (2026-09-24)
   "gpt-6-sol": { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
   "gpt-5-mini": { input: 0.25, output: 2, cache_read: 0.025 },
   "o3": { input: 2, output: 8, cache_read: 0.5 },
@@ -394,6 +400,12 @@ function getModelPricing(model: string, source = "") {
   // reports its own positive cost still wins earlier via
   // SOURCES_WITH_AUTHORITATIVE_COST.
   if (lower.includes("cline-free/") || lower.includes("cline-pass/")) return ZERO_PRICING;
+  if (/fable-5[.-]1/.test(lower)) return MODEL_PRICING["claude-fable-5-1"];
+  if (/opus-5[.-]5-fast/.test(lower)) return MODEL_PRICING["claude-opus-5-5-fast"];
+  if (/opus-5[.-]5/.test(lower)) return MODEL_PRICING["claude-opus-5-5"];
+  if (/sonnet-5[.-]5/.test(lower)) return MODEL_PRICING["claude-sonnet-5-5"];
+  if (lower.includes("sonnet-5")) return MODEL_PRICING["claude-sonnet-5"];
+  if (lower.includes("gpt-6.1-sol")) return MODEL_PRICING["gpt-6.1-sol"];
   if (lower.includes("fable")) return MODEL_PRICING["claude-fable-5"];
   // Opus 5 fast mode bills at 2x the standard Opus tier ($10/$50), so the
   // -fast matcher must precede both the opus-5 and the generic opus fallback.

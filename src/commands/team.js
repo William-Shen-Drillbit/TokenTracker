@@ -12,6 +12,7 @@ const CLI = path.resolve(__dirname, "../../bin/tracker.js");
 const PORT = 7682;
 const LABEL = "com.tokentracker.team";
 const INTERVAL = 15 * 60_000;
+const QUOTA_INTERVAL = 5 * 60_000;
 
 async function configAt(dir) {
   const config = await readJson(path.join(dir, "config.json"));
@@ -88,8 +89,7 @@ async function runRoutine(dir, { now = new Date(), sync = syncTeam } = {}) {
     const file = path.join(dir, "routine-completed.json");
     const receipt = await readJson(file);
     if (receipt && (receipt.personId !== config.personId || receipt.machineId !== config.machineId)) throw new Error("Routine receipt belongs to a different enrollment");
-    const date = team.dueReport(now, receipt ? [receipt.date] : [], config.routineActivatedOn);
-    if (!date) return { skipped: true, reason: "No uncompleted Central date is due" };
+    const { date } = team.centralDate(now);
     const status = await sync(dir);
     if (status.busy || status.errors?.length) return { date, ...status };
     if (!["collectedAt", "uploadedAt", "downloadedAt"].every(key => Date.parse(status[key]) >= now.getTime())) throw new Error("Routine did not verify fresh collection and Registry exchange");
@@ -106,10 +106,10 @@ function localRequest(req, port) {
   return req.method === "GET";
 }
 
-async function serveTeam(dir, { worker = true } = {}) {
+async function serveTeam(dir, { worker = true, sampleQuota = require("../lib/team-quota-history").refreshQuotaHistory } = {}) {
   const config = await configAt(dir);
   worker = worker && config.collectionMode !== "routine";
-  const port = config.port || PORT;
+  const port = config.port ?? PORT;
   const html = await fs.readFile(path.join(__dirname, "../lib/team-dashboard.html"));
   const server = http.createServer(async (req, res) => {
     res.setHeader("Cache-Control", "no-store");
@@ -131,18 +131,27 @@ async function serveTeam(dir, { worker = true } = {}) {
   });
   await new Promise((resolve, reject) => { server.once("error", reject); server.listen(port, "127.0.0.1", resolve); });
   console.log(`Team dashboard: http://127.0.0.1:${port}`);
-  let timer, running = false;
-  const tick = async () => {
+  let timer, running = false, quotaDue = 0;
+  const observeQuota = config.collectionMode === "routine" && config.backend === "registry";
+  const tick = async (now = Date.now()) => {
     if (running) return;
     running = true;
     try {
-      const status = await readJson(path.join(dir, "status.json"));
-      if (!status?.retryAt || Date.parse(status.retryAt) <= Date.now()) await syncTeam(dir);
-      await prepareReport(dir);
+      // Reuse the installed dashboard process for local evidence only. The
+      // personal routine remains the sole scheduled collector/uploader.
+      if (observeQuota && now >= quotaDue) {
+        quotaDue = now + QUOTA_INTERVAL;
+        await sampleQuota({ home: os.homedir(), dir, now: new Date(now).toISOString() });
+      }
+      if (worker) {
+        const status = await readJson(path.join(dir, "status.json"));
+        if (!status?.retryAt || Date.parse(status.retryAt) <= Date.now()) await syncTeam(dir);
+        await prepareReport(dir);
+      }
     } catch (e) { console.error(e.message); }
     finally { running = false; }
   };
-  if (worker) { void tick(); timer = setInterval(tick, 60_000); }
+  if (worker || observeQuota) { void tick(); timer = setInterval(tick, 60_000); }
   const stop = () => { clearInterval(timer); server.close(); };
   server.on("close", () => clearInterval(timer));
   return { server, stop, tick };

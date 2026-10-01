@@ -74,8 +74,8 @@ function normalizeZedModel(model) {
     .replace(/[^a-z0-9./]+/g, "-") // spaces/underscores -> hyphen; keep . and /
     .replace(/^-+|-+$/g, "")
     .replace(/-{2,}/g, "-");
-  if (/^claude-(sonnet|opus|haiku)-\d+\.\d+/.test(m)) {
-    m = m.replace(/^(claude-(?:sonnet|opus|haiku)-\d+)\.(\d+)/, "$1-$2");
+  if (/^claude-(sonnet|opus|haiku|fable)-\d+\.\d+/.test(m)) {
+    m = m.replace(/^(claude-(?:sonnet|opus|haiku|fable)-\d+)\.(\d+)/, "$1-$2");
   }
   return m;
 }
@@ -101,20 +101,20 @@ function normalizeClaudeModel(model) {
     .replace(/^-+|-+$/g, "")
     .replace(/-{2,}/g, "-");
 
-  if (/^claude-(sonnet|opus|haiku)-\d+\.\d+/.test(m)) {
-    return m.replace(/^(claude-(?:sonnet|opus|haiku)-\d+)\.(\d+)/, "$1-$2");
+  if (/^claude-(sonnet|opus|haiku|fable)-\d+\.\d+/.test(m)) {
+    return m.replace(/^(claude-(?:sonnet|opus|haiku|fable)-\d+)\.(\d+)/, "$1-$2");
   }
-  if (/^(sonnet|opus|haiku)-\d+[.-]\d+/.test(m)) {
+  if (/^(sonnet|opus|haiku|fable)-\d+[.-]\d+/.test(m)) {
     return m
-      .replace(/^(sonnet|opus|haiku)-/, "claude-$1-")
-      .replace(/^(claude-(?:sonnet|opus|haiku)-\d+)\.(\d+)/, "$1-$2");
+      .replace(/^(sonnet|opus|haiku|fable)-/, "claude-$1-")
+      .replace(/^(claude-(?:sonnet|opus|haiku|fable)-\d+)\.(\d+)/, "$1-$2");
   }
   // Some relays invert tier/version order (`claude-4.6-opus` instead of the
   // canonical `claude-opus-4-6`). Restore it ONLY for major>=4 — Claude 3.x is
   // genuinely version-first (`claude-3-5-sonnet`, `claude-3-opus`) and must stay
   // untouched.
-  if (/^claude-(?:[4-9]|\d{2,})[.-]\d+-(?:sonnet|opus|haiku)/.test(m)) {
-    return m.replace(/^claude-(\d+)[.-](\d+)-(sonnet|opus|haiku)/, "claude-$3-$1-$2");
+  if (/^claude-(?:[4-9]|\d{2,})[.-]\d+-(?:sonnet|opus|haiku|fable)/.test(m)) {
+    return m.replace(/^claude-(\d+)[.-](\d+)-(sonnet|opus|haiku|fable)/, "claude-$3-$1-$2");
   }
 
   return m;
@@ -238,7 +238,9 @@ function lookupContainedExactCaseInsensitive(table, model) {
   const lower = model.toLowerCase();
   const keys = Object.keys(table).sort((a, b) => b.length - a.length);
   for (const key of keys) {
-    if (lower.includes(key.toLowerCase())) return table[key];
+    const index = lower.indexOf(key.toLowerCase());
+    // A dot followed by a digit continues the version, not a model suffix.
+    if (index !== -1 && !/^\.\d/.test(lower.slice(index + key.length))) return table[key];
   }
   return null;
 }
@@ -284,11 +286,6 @@ function lookupPricing(model, { curated, litellm, source } = {}) {
   if (curatedDotExact) {
     return { hit: true, source: "curated:exact-dot", value: curatedDotExact };
   }
-  const curatedDotContainedExact = lookupContainedExactCaseInsensitive(curated.exact, dotForm);
-  if (curatedDotContainedExact) {
-    return { hit: true, source: "curated:exact-dot", value: curatedDotContainedExact };
-  }
-
   // 2. LiteLLM exact
   if (litellm && litellm[lookupModel]) {
     return { hit: true, source: "litellm:exact", value: litellm[lookupModel] };
@@ -296,6 +293,13 @@ function lookupPricing(model, { curated, litellm, source } = {}) {
   const litellmDotExact = lookupExactCaseInsensitive(litellm, dotForm);
   if (litellmDotExact) {
     return { hit: true, source: "litellm:exact-dot", value: litellmDotExact };
+  }
+
+  // Containment is a fallback, never an exact match: a newer LiteLLM SKU
+  // must win over a curated parent name (for example Fable 5.1 over Fable 5).
+  const curatedDotContainedExact = lookupContainedExactCaseInsensitive(curated.exact, dotForm);
+  if (curatedDotContainedExact) {
+    return { hit: true, source: "curated:exact-dot", value: curatedDotContainedExact };
   }
 
   // 3. CURATED alias (literal mapping like "auto" -> "composer-1")

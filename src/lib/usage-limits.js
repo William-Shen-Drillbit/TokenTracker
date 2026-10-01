@@ -4229,6 +4229,18 @@ async function fetchUsageLimitsUncached({
     };
   }
 
+  // Reuse live reads for enrolled team history; never relabel a cache fallback as new.
+  const { captureQuotaHistory } = require("./team-quota-history");
+  data.team_quota_capture = await captureQuotaHistory({
+    home,
+    claude: claudeResult?.status === "fulfilled" ? claude : null,
+    codex: codexLiveUsageSucceeded ? codex : null,
+    codexAccountId,
+    claudePlan: claudePlanType,
+    claudeTier: claudeSubscription?.rateLimitTier,
+    now: new Date(nowMs).toISOString(),
+  }).catch(() => ({ status: "failed", findings: ["Quota history could not be saved; the previous history was retained."] }));
+
   cacheByDevinSelection[devinSelectionKey({ devinEnabled })] = {
     data,
     expiresAtMs: cacheExpiresAtMs(data, nowMs),
@@ -4243,6 +4255,8 @@ function resetUsageLimitsCache() {
 
 module.exports = {
   getUsageLimits,
+  readFreshClaudeLimitsCache,
+  fetchCodexUsageLimits,
   normalizePlanLabel,
   resetUsageLimitsCache,
   cacheExpiresAtMs,
