@@ -23555,6 +23555,10 @@ async function parseDshIncremental({ sessionFiles, cursors, queuePath, onProgres
 
 
 module.exports = {
+  normalizeClaudeUsage,
+  claudeMessageDedupKey,
+  normalizeModelInput,
+  toUtcHalfHourStart,
   listRolloutFiles,
   listRolloutFilesDeep,
   codexSessionIdFromPath,

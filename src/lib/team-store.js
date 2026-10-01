@@ -183,7 +183,8 @@ async function collectSnapshot(config, dir = TEAM_DIR, now = new Date().toISOStr
   }
   const since = Date.parse(now) - (config.historyDays || 90) * 86_400_000;
   const rawRows = readQueueData(queuePath).filter(r => Date.parse(r.hour_start) >= since && Date.parse(r.hour_start) <= Date.parse(now));
-  const rows = rawRows.map(r => {
+  const attribution = await require("./team-claude-attribution").attributeClaudeRows(rawRows, accounts, { roots: inventory.roots.claude });
+  const rows = attribution.rows.map(r => {
     const pricing = getRowPricing(r);
     const priced = pricing && Object.values(pricing).some(value => typeof value === "number" && value > 0);
     // Queue buckets do not retain provider-account identity. Never label old
@@ -205,6 +206,7 @@ async function collectSnapshot(config, dir = TEAM_DIR, now = new Date().toISOStr
     machineId: config.machineId, machineName: config.machineName, collectedAt: now, pricingRevision: getPricingRevision(),
     accounts, planObservations: inventory.planObservations, rows, billing, findings: [
       ...inventory.findings,
+      ...attribution.findings,
       "Account inventory describes observed sign-ins; historical usage without account identity remains unassigned.",
       "API-equivalent value is an estimate, not charges or overage. Missing billing is unknown.",
       "Coverage is retained local logs from supported tools; browser-only usage and undiscovered account directories may be absent.",
