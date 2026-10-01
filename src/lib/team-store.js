@@ -193,10 +193,12 @@ async function collectSnapshot(config, dir = TEAM_DIR, now = new Date().toISOStr
   await fs.access(queuePath); // Missing source is not zero usage.
   const previous = await readJson(path.join(dir, "snapshot.json")) || {};
   // Quota sampling never uploads, creates schedules, or blocks token collection.
-  const quota = config.collectionMode === "routine" && config.backend === "registry"
+  const sampledQuota = config.collectionMode === "routine" && config.backend === "registry"
     ? await refreshQuotaHistory({ dir, now })
     : await readQuotaHistory({ dir, now });
   const inventory = await require("./team-account-inventory").discoverInventory({ now, previous });
+  const quota = normalizeQuotaHistory({ observations: [...sampledQuota.observations, ...inventory.quotaObservations],
+    findings: [...sampledQuota.findings, ...inventory.quotaFindings] }, { now });
   const accounts = inventory.accounts;
   const resolveAccount = id => {
     if (accounts.some(a => a.id === id)) return id;
