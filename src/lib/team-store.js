@@ -9,11 +9,15 @@ const { promisify } = require("node:util");
 const { execFile } = require("node:child_process");
 const { writeFileAtomic, readJson, openLock } = require("./fs");
 const { getOrCreateMachineId } = require("./machine-id");
-const { computeRowCost, getRowPricing, getPricingRevision } = require("./pricing");
+const { computeRowCost, getRowPricing, getPricingRevision, SOURCES_WITH_AUTHORITATIVE_COST } = require("./pricing");
+const { normalizeQuotaHistory, readQuotaHistory, refreshQuotaHistory } = require("./team-quota-history");
 
 const runFile = promisify(execFile);
 const TEAM_DIR = path.join(os.homedir(), ".tokentracker", "team");
 const COUNTERS = ["input_tokens", "cached_input_tokens", "cache_creation_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens"];
+const PRICE_COMPONENTS = COUNTERS.filter(k => k !== "total_tokens");
+const PRICE_COUNTERS = ["long_context_", "priority_", "priority_long_context_"].flatMap(prefix => PRICE_COMPONENTS.map(k => prefix + k));
+const PRICE_RATES = ["input", "cache_read", "cache_write", "output", "priority_multiplier"];
 const MAX_BYTES = 900_000;
 const MAX_EXPANDED_BYTES = 25_000_000;
 const ID = /^[A-Za-z0-9_.-]{1,128}$/;
@@ -27,6 +31,23 @@ function number(value) { if (typeof value !== "number" || !Number.isFinite(value
 function timestamp(value) { if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) throw new Error("Invalid timestamp"); return new Date(value).toISOString(); }
 function hash(value) { return crypto.createHash("sha256").update(value).digest("hex").slice(0, 24); }
 async function save(file, value) { await writeFileAtomic(file, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 }); }
+
+function authoritativeCost(row) {
+  return SOURCES_WITH_AUTHORITATIVE_COST.has(row.source) && row.total_cost_usd != null
+    ? { total_cost_usd: number(row.total_cost_usd) } : {};
+}
+
+function pricingCounters(row) {
+  return Object.fromEntries(PRICE_COUNTERS.filter(k => row[k] != null).map(k => {
+    const base = k.replace(/^(priority_long_context_|long_context_|priority_)/, "");
+    const value = number(row[k]);
+    const maximum = k.startsWith("priority_long_context_")
+      ? Math.min(number(row[base] ?? 0), number(row["priority_" + base] ?? 0), number(row["long_context_" + base] ?? 0))
+      : number(row[base] ?? 0);
+    if (value > maximum) throw new Error("Pricing subset exceeds token count");
+    return [k, value];
+  }));
+}
 
 // Allowlist both outbound and inbound fields. Never transport source records,
 // credentials, absolute paths, prompts, session titles, or arbitrary properties.
@@ -55,6 +76,8 @@ function normalizeSnapshot(raw) {
     return {
       source: text(r.source), model: text(r.model), hour_start: timestamp(r.hour_start), accountId,
       ...Object.fromEntries(COUNTERS.map(k => [k, number(r[k] ?? 0)])),
+      ...pricingCounters(r), ...authoritativeCost(r),
+      ...(r.priceRates ? { priceRates: Object.fromEntries(PRICE_RATES.filter(k => r.priceRates[k] != null).map(k => [k, number(r.priceRates[k])])) } : {}),
       estimatedUsd: r.estimatedUsd == null ? null : number(r.estimatedUsd),
     };
   });
@@ -72,11 +95,13 @@ function normalizeSnapshot(raw) {
     };
   });
   if (billing.length > 2400) throw new Error("Too many billing cycles");
+  const quota = normalizeQuotaHistory({ version: 1, observations: raw.quotaObservations || [], findings: raw.quotaFindings || [] }, { now: raw.collectedAt });
   return {
     version: 1, personId: identifier(raw.personId), personName: text(raw.personName),
     machineId: identifier(raw.machineId), machineName: text(raw.machineName),
     collectedAt: timestamp(raw.collectedAt), pricingRevision: text(String(raw.pricingRevision || "unknown")),
     accounts, planObservations, billing, rows,
+    quotaObservations: quota.observations, quotaFindings: quota.findings,
     findings: (raw.findings || []).slice(0, 100).map(f => text(f, 500)),
   };
 }
@@ -167,6 +192,10 @@ async function collectSnapshot(config, dir = TEAM_DIR, now = new Date().toISOStr
   const queuePath = config.queuePath || resolveQueuePath();
   await fs.access(queuePath); // Missing source is not zero usage.
   const previous = await readJson(path.join(dir, "snapshot.json")) || {};
+  // Quota sampling never uploads, creates schedules, or blocks token collection.
+  const quota = config.collectionMode === "routine" && config.backend === "registry"
+    ? await refreshQuotaHistory({ dir, now })
+    : await readQuotaHistory({ dir, now });
   const inventory = await require("./team-account-inventory").discoverInventory({ now, previous });
   const accounts = inventory.accounts;
   const resolveAccount = id => {
@@ -186,12 +215,16 @@ async function collectSnapshot(config, dir = TEAM_DIR, now = new Date().toISOStr
   const attribution = await require("./team-claude-attribution").attributeClaudeRows(rawRows, accounts, { roots: inventory.roots.claude });
   const rows = attribution.rows.map(r => {
     const pricing = getRowPricing(r);
-    const priced = pricing && Object.values(pricing).some(value => typeof value === "number" && value > 0);
+    const reportedCost = authoritativeCost(r);
+    const priced = reportedCost.total_cost_usd > 0 || (pricing && Object.values(pricing).some(value => typeof value === "number" && value > 0));
     // Queue buckets do not retain provider-account identity. Never label old
     // usage with the account currently signed in. Explicit provenance wins.
     const accountId = r.account_id ? resolveAccount(r.account_id) : null;
     return { source: r.source || "unknown", model: r.model || "unknown", hour_start: r.hour_start,
-      accountId, ...Object.fromEntries(COUNTERS.map(k => [k, r[k] || 0])), estimatedUsd: priced ? computeRowCost(r) : null };
+      accountId, ...Object.fromEntries(COUNTERS.map(k => [k, r[k] || 0])), ...reportedCost,
+      ...Object.fromEntries(PRICE_COUNTERS.filter(k => r[k] != null).map(k => [k, r[k]])),
+      ...(priced ? { priceRates: Object.fromEntries(PRICE_RATES.filter(k => pricing[k] != null).map(k => [k, pricing[k]])) } : {}),
+      estimatedUsd: priced ? computeRowCost(r) : null };
   });
   const billing = await readJson(path.join(dir, "billing.json")) || [];
   for (const b of billing) {
@@ -204,9 +237,11 @@ async function collectSnapshot(config, dir = TEAM_DIR, now = new Date().toISOStr
   }
   return normalizeSnapshot({ version: 1, personId: config.personId, personName: config.personName,
     machineId: config.machineId, machineName: config.machineName, collectedAt: now, pricingRevision: getPricingRevision(),
-    accounts, planObservations: inventory.planObservations, rows, billing, findings: [
+    accounts, planObservations: inventory.planObservations, rows, billing,
+    quotaObservations: quota.observations, quotaFindings: quota.findings, findings: [
       ...inventory.findings,
       ...attribution.findings,
+      ...quota.findings,
       "Account inventory describes observed sign-ins; historical usage without account identity remains unassigned.",
       "API-equivalent value is an estimate, not charges or overage. Missing billing is unknown.",
       "Coverage is retained local logs from supported tools; browser-only usage and undiscovered account directories may be absent.",
@@ -284,13 +319,13 @@ function aggregate(snapshots, { from, to, now = Date.now() } = {}) {
   const start = from ? Date.parse(from) : now - 30 * 86_400_000;
   const end = to ? Date.parse(to) : now;
   if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end) throw new Error("Invalid date range");
-  const people = new Map(), details = [], accounts = new Map(), cycles = new Map(), observations = new Map();
+  const people = new Map(), details = [], accounts = new Map(), cycles = new Map(), observations = new Map(), quotas = new Map();
   for (const raw of snapshots) {
     const s = normalizeSnapshot(raw);
     let person = people.get(s.personId);
     if (!person) { person = { id: s.personId, name: s.personName, tokens: 0, estimatedUsd: 0, unpricedTokens: 0, unassignedTokens: 0, reportedOverageUsd: null, machines: [], findings: [] }; people.set(s.personId, person); }
     person.machines.push({ id: s.machineId, name: s.machineName, collectedAt: s.collectedAt, stale: now - Date.parse(s.collectedAt) > 26 * 3_600_000 });
-    person.findings = [...new Set([...person.findings, ...s.findings])];
+    person.findings = [...new Set([...person.findings, ...s.findings, ...s.quotaFindings])];
     for (const a of s.accounts) {
       const key = `${s.personId}/${a.id}`;
       if (!accounts.has(key) || accounts.get(key).observedAt < a.observedAt) accounts.set(key, { ...a, personId: s.personId });
@@ -301,6 +336,12 @@ function aggregate(snapshots, { from, to, now = Date.now() } = {}) {
       observations.set(key, { ...o, personId: s.personId,
         firstSeen: old && old.firstSeen < o.firstSeen ? old.firstSeen : o.firstSeen,
         lastSeen: old && old.lastSeen > o.lastSeen ? old.lastSeen : o.lastSeen });
+    }
+    for (const o of s.quotaObservations) {
+      // Account-wide quota measurements are observations, not additive usage.
+      const time = Date.parse(o.observedAt);
+      if (time < start || time >= end) continue;
+      quotas.set(`${s.personId}/${o.id}`, { ...o, personId: s.personId });
     }
     for (const b of s.billing) {
       // Cycle totals cannot be prorated into an arbitrary date filter.
@@ -327,7 +368,7 @@ function aggregate(snapshots, { from, to, now = Date.now() } = {}) {
     p.estimatedExcessUsd = modeled.length ? modeled.reduce((n, a) => n + a.estimatedExcessUsd, 0) : null;
   }
   const list = [...people.values()].sort((a, b) => (b.estimatedExcessUsd ?? -1) - (a.estimatedExcessUsd ?? -1));
-  return { excess, from: new Date(start).toISOString(), to: new Date(end).toISOString(), people: list, accounts: [...accounts.values()], planObservations: [...observations.values()], billing: [...cycles.values()], details,
+  return { excess, from: new Date(start).toISOString(), to: new Date(end).toISOString(), people: list, accounts: [...accounts.values()], planObservations: [...observations.values()], billing: [...cycles.values()], quotaObservations: [...quotas.values()], details,
     totals: { people: list.length, tokens: list.reduce((n, p) => n + p.tokens, 0), estimatedUsd: list.reduce((n, p) => n + p.estimatedUsd, 0), reportedOverageUsd: list.some(p => p.reportedOverageUsd != null) ? list.reduce((n, p) => n + (p.reportedOverageUsd || 0), 0) : null },
     coverage: "Enrolled machines only. Billing totals cover the listed full cycles that overlap the date filter; estimates cover the selected timestamps. Unknown billing is not zero. Modeled allowances are prorated by the selected duration, not provider reset windows; unused allowance is not transferred across accounts." };
 }
@@ -355,4 +396,4 @@ function renderReport(summary, date, dashboardUrl = "http://127.0.0.1:7682") {
   return lines.join("\n");
 }
 
-module.exports = { TEAM_DIR, COUNTERS, save, ghApi, verifyRepository, uploadSnapshot, downloadSnapshots, discoverAccounts, collectSnapshot, loadSnapshots, aggregate, normalizeSnapshot, encodeSnapshot, decodeSnapshot, centralDate, dueReport, renderReport, planAllowance, estimateExcess, hash, runFile, getOrCreateMachineId, openLock };
+module.exports = { TEAM_DIR, COUNTERS, PRICE_COUNTERS, save, ghApi, verifyRepository, uploadSnapshot, downloadSnapshots, discoverAccounts, collectSnapshot, loadSnapshots, aggregate, normalizeSnapshot, encodeSnapshot, decodeSnapshot, centralDate, dueReport, renderReport, planAllowance, estimateExcess, hash, runFile, getOrCreateMachineId, openLock };

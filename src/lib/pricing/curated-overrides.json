@@ -13,6 +13,13 @@
       "cache_write": 0,
       "note": "Cline's own gateway namespaces (`cline-free/*` free tier, `cline-pass/*` flat-rate Cline Pass). Cline's shipped model catalog declares pricing 0 for every id in both namespaces, so a turn there has no marginal per-token cost — same convention as PI_SUBSCRIPTION_SOURCES. The fuzzy entries at the top of `fuzzy` route both prefixes here BEFORE the model names can match a public rate (`cline-pass/glm-5.3` must not bill GLM-5.3 list price, `cline-free/deepseek-v4.1-flash` must not bill DeepSeek). Verified against Cline 0.0.32 (/Applications/Cline.app model catalog + `usageDelta` cost, which stays 0 for both namespaces). A Cline turn that DOES report a positive per-call cost is honoured first because `cline` is listed in SOURCES_WITH_AUTHORITATIVE_COST in pricing/index.js. Remove or re-point these entries when Cline publishes per-token pricing for either namespace."
     },
+    "claude-fable-5-1": {
+      "input": 10,
+      "output": 50,
+      "cache_read": 0.25,
+      "cache_write": 12.5,
+      "note": "Official launch rates from 2026-09-01, verified 2026-10-01: https://platform.claude.com/docs/en/models/fable-5-1/overview. Cache reads are 2.5% of input, not the Fable 5 rate."
+    },
     "claude-fable-5": {
       "input": 10,
       "output": 50,
@@ -20,12 +27,26 @@
       "cache_write": 12.5,
       "note": "Fable 5 \u2014 Anthropic's top tier above Opus. Not yet in LiteLLM. $10/$50 per MTok; cache_read 0.1x, cache_write 1.25x. Remove once LiteLLM carries it."
     },
+    "claude-opus-5-5": {
+      "input": 4,
+      "output": 20,
+      "cache_read": 0.2,
+      "cache_write": 5,
+      "note": "Official launch rates from 2026-09-22, verified 2026-10-01: https://www.anthropic.com/claude-opus-5-5. Cache reads are 5% of input. Fast mode has a separate SKU below."
+    },
     "claude-opus-5": {
       "input": 5,
       "output": 25,
       "cache_read": 0.5,
       "cache_write": 6.25,
       "note": "Opus 5 (public 2026-07). Standard Opus tier, unchanged from 4.6/4.7/4.8: $5/$25 per MTok, cache_read 0.1x, cache_write 1.25x. Not yet in LiteLLM. Fast mode is billed at $10/$50 \u2014 see claude-opus-5-fast. Remove once LiteLLM carries it."
+    },
+    "claude-opus-5-5-fast": {
+      "input": 8,
+      "output": 40,
+      "cache_read": 0.4,
+      "cache_write": 10,
+      "note": "Official Opus 5.5 Fast rate is 2x Standard, including cache pricing: https://platform.claude.com/docs/en/about-claude/pricing. Verified 2026-10-01."
     },
     "claude-opus-5-fast": {
       "input": 10,
@@ -41,12 +62,19 @@
       "cache_write": 6.25,
       "note": "Opus 4.8 not yet in LiteLLM. Pin to the standard Opus tier (same as 4.6/4.7); remove once LiteLLM carries it."
     },
+    "claude-sonnet-5-5": {
+      "input": 2,
+      "output": 10,
+      "cache_read": 0.2,
+      "cache_write": 2.5,
+      "note": "Official launch rates from 2026-09-28, verified 2026-10-01: https://www.anthropic.com/claude-sonnet-5-5. Same rates as Sonnet 5."
+    },
     "claude-sonnet-5": {
-      "input": 3,
-      "output": 15,
-      "cache_read": 0.3,
-      "cache_write": 3.75,
-      "note": "Sonnet 5. LiteLLM added this model on ~2026-06-30 with matching rates, but pin explicitly so pricing is correct immediately rather than depending on the 24h local pricing-cache refresh cycle."
+      "input": 2,
+      "output": 10,
+      "cache_read": 0.2,
+      "cache_write": 2.5,
+      "note": "Official launch rates from 2026-06-30: https://www.anthropic.com/news/claude-sonnet-5. The 2026-08-10 changelog made the $2/$10 introductory rates permanent; the planned September $3/$15 increase never applied. Verified 2026-10-01 with https://platform.claude.com/docs/en/models/sonnet-5/overview."
     },
     "claude-haiku-4-5": {
       "input": 1,
@@ -62,6 +90,14 @@
       "cache_write": 12.5,
       "priority_multiplier": 2,
       "note": "Official Standard USD/MTok rates verified 2026-09-07: https://developers.openai.com/api/docs/models/gpt-6-astra. Requests above 272K input tokens use 2x input/cache and 1.5x output rates; computeRowCost applies this only to observed long-context request subsets. priority_multiplier is the Fast tier, whose published table (20/2/25/100 short, 40/4/50/150 long, verified 2026-09-12) is exactly 2x the Standard rate of the same context tier — it multiplies, it does not replace, the long-context premium. The 2.5x figure in the Codex speed docs is a subscription-credit rate and must not be used here. computeRowCost applies it only to observed priority request subsets; usage whose service tier the logs never recorded stays Standard. Cloud aggregates use Standard short-context estimates because they do not retain per-request context or service tier. Reasoning-effort suffixes use the same base rates."
+    },
+    "gpt-6.1-sol": {
+      "input": 2,
+      "output": 10,
+      "cache_read": 0.1,
+      "cache_write": 2.5,
+      "priority_multiplier": 2,
+      "note": "Official Standard USD/MTok rates verified 2026-10-01: https://developers.openai.com/api/docs/models/gpt-6.1-sol. Cache reads are 5% of input. Requests above 272K input use 2x input/cache and 1.5x output; Fast mode is 2x the applicable Standard rate. Premiums apply only to observed request subsets."
     },
     "gpt-6-sol": {
       "input": 2,
@@ -538,6 +574,30 @@
     {
       "match": "cline-pass/",
       "ref": "cline-gateway-models"
+    },
+    {
+      "match": "claude-opus-5-5-fast",
+      "ref": "claude-opus-5-5-fast"
+    },
+    {
+      "match": "claude-opus-5-5",
+      "ref": "claude-opus-5-5"
+    },
+    {
+      "match": "claude-fable-5-1",
+      "ref": "claude-fable-5-1"
+    },
+    {
+      "match": "claude-sonnet-5-5",
+      "ref": "claude-sonnet-5-5"
+    },
+    {
+      "match": "claude-sonnet-5",
+      "ref": "claude-sonnet-5"
+    },
+    {
+      "match": "gpt-6.1-sol",
+      "ref": "gpt-6.1-sol"
     },
     {
       "match": "gpt-6-astra",
