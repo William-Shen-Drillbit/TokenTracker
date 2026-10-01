@@ -55,3 +55,47 @@ test("discover workspaces, alternate roots and historical plans without exportin
     assert.equal(repeat.accounts.length, again.accounts.length); assert.equal(repeat.planObservations.length, again.planObservations.length);
   } finally { await fs.rm(home, { recursive: true, force: true }); }
 });
+
+test("existing Codex metadata scan backfills sparse quota history without assigning today's account or inventing charges", async t => {
+  const home = await fs.mkdtemp(path.join(os.tmpdir(), "quota-backfill-"));
+  t.after(() => fs.rm(home, { recursive: true, force: true }));
+  const dir = path.join(home, ".codex");
+  await fs.mkdir(path.join(dir, "sessions"), { recursive: true });
+  await fs.mkdir(path.join(dir, "archived_sessions"));
+  const claims = { "https://api.openai.com/auth": { chatgpt_account_id: "current-account", chatgpt_plan_type: "pro" } };
+  await fs.writeFile(path.join(dir, "auth.json"), JSON.stringify({ tokens: { id_token: `header.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.SECRET` } }));
+  const event = (timestamp, used_percent, resets_at = 1791384102) => ({ type: "event_msg", timestamp,
+    payload: { type: "token_count", rate_limits: { plan_type: "self_serve_business_prolite",
+      primary: { used_percent, window_minutes: 10080, resets_at, arbitrary: "PRIVATE" }, secondary: null,
+      credits: { has_credits: true, balance: "62500", unlimited: false }, account_id: "unverified-account", prompt: "PRIVATE" } } });
+  const events = [event("2026-09-30T15:00:00Z", 40), event("2026-09-30T15:05:00Z", 40),
+    event("2026-09-30T15:10:00Z", 40), event("2026-09-30T16:00:00Z", 1, 1791480582),
+    event("2025-09-30T15:00:00Z", 80), event("bad", 99),
+    { type: "event_msg", timestamp: "2026-09-30T15:00:00Z", payload: { type: "user_message", rate_limits: { plan_type: "PRIVATE" } } }];
+  const log = events.map(e => JSON.stringify(e)).join("\n");
+  // Mirrored rollout metadata must not duplicate quota history.
+  await fs.writeFile(path.join(dir, "sessions", "rollout-test.jsonl"), log);
+  await fs.writeFile(path.join(dir, "archived_sessions", "rollout-copy.jsonl"), log);
+  const found = await discoverInventory({ home, env: {}, now: "2026-10-01T15:00:00Z", subscriptionDetails: null });
+  assert.equal(found.accounts.length, 1);
+  assert.equal(found.quotaObservations.length, 3); // first/last unchanged read, then observed drop
+  assert.deepEqual(found.quotaObservations.map(o => o.windows[0].usedPercent), [40, 40, 1]);
+  assert.equal(found.quotaObservations[0].windows[0].windowSeconds, 604800);
+  assert.equal(found.quotaObservations[0].observedAt, "2026-09-30T15:00:00.000Z");
+  for (const observation of found.quotaObservations) {
+    assert.equal(observation.source, "retained-log");
+    assert.equal(observation.accountId, null);
+    assert.equal(observation.creditWindow, null);
+    assert.equal(observation.resetCredits, null);
+    assert.deepEqual(observation.monetary, []);
+  }
+  const snapshot = decodeSnapshot(encodeSnapshot({ version: 1, personId: "person", personName: "Person", machineId: "mac",
+    machineName: "Mac", collectedAt: "2026-10-01T15:00:00Z", accounts: found.accounts, rows: [],
+    quotaObservations: found.quotaObservations, quotaFindings: found.quotaFindings }));
+  assert.doesNotMatch(JSON.stringify(snapshot), /PRIVATE|SECRET|unverified-account|62500/);
+  const report = aggregate([snapshot], { from: "2026-09-01", to: "2026-10-02" });
+  assert.equal(report.quotaObservations.length, 3);
+  assert.equal(report.totals.reportedOverageUsd, null);
+  assert.match(report.people[0].findings.join(" "), /quota drops do not prove a manual or paid reset/);
+  assert.doesNotMatch(report.people[0].findings.join(" "), /backfill is unavailable/);
+});

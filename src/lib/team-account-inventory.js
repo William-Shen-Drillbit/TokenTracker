@@ -6,6 +6,7 @@ const path = require("node:path");
 const os = require("node:os");
 const crypto = require("node:crypto");
 const { readJsonStrict } = require("./fs");
+const { observationFromCodexLog, normalizeQuotaHistory, MAX_OBSERVATIONS } = require("./team-quota-history");
 const hash = value => crypto.createHash("sha256").update(value).digest("hex").slice(0, 24);
 const clean = value => typeof value === "string" && value.trim() && value.length <= 160 && !/[\x00-\x1f]/.test(value) ? value.trim() : null;
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
@@ -31,6 +32,7 @@ async function profileRoots(home = os.homedir(), env = process.env) {
 async function discoverInventory({ home = os.homedir(), env = process.env, now = new Date().toISOString(), previous = {}, subscriptionDetails } = {}) {
   const findings = new Set(), accounts = new Map(), observations = new Map();
   const roots = await profileRoots(home, env);
+  let quota = normalizeQuotaHistory({ observations: previous.quotaObservations, findings: previous.quotaFindings }, { now });
   const metadata = async file => {
     const result = await readJsonStrict(file);
     if (!["ok", "missing"].includes(result.status)) findings.add("Some local account metadata is unreadable or invalid; account coverage is incomplete.");
@@ -108,11 +110,15 @@ async function discoverInventory({ home = os.homedir(), env = process.env, now =
         const lines = readline.createInterface({ input: createReadStream(file), crlfDelay: Infinity });
         try {
           for await (const line of lines) {
-            if (!line.includes('"plan_type"')) continue;
+            if (!line.includes('"rate_limits"')) continue;
             let event; try { event = JSON.parse(line); } catch { continue; }
-            if (event.type !== "event_msg" || event.payload?.type !== "token_count") continue;
-            const plan = clean(event.payload.rate_limits?.plan_type);
+            const payload = event.payload?.type === "token_count" ? event.payload : event.payload?.msg;
+            if (event.type !== "event_msg" || payload?.type !== "token_count") continue;
+            const plan = clean(payload.rate_limits?.plan_type);
             if (plan) observe({ provider: "openai", plan, at: event.timestamp, evidence: "codex-usage-metadata" });
+            const observation = observationFromCodexLog(event);
+            if (observation) quota.observations.push(observation);
+            if (quota.observations.length >= 2 * MAX_OBSERVATIONS) quota = normalizeQuotaHistory(quota, { now });
           }
         } catch { findings.add("Some retained Codex plan history could not be read; coverage is incomplete."); }
         finally { lines.close(); }
@@ -137,6 +143,9 @@ async function discoverInventory({ home = os.homedir(), env = process.env, now =
   if ([...observations.values()].some(o => !o.accountId && !knownPlans.has(`${o.provider}:${o.plan}`))) findings.add("Additional historical plans were observed without account identity; the current plan cannot represent all historical usage.");
   if ([...accounts.values()].some(a => !a.plan)) findings.add("Additional workspaces were discovered but their subscription plans are unknown. They are included in the inventory, not treated as free or zero usage.");
   findings.add("Discovery covers retained supported profiles, Claude Desktop workspaces, profile backups and Codex plan history. Deleted accounts, inaccessible profiles, browser-only activity and unobserved plan changes remain unknown.");
-  return { accounts: [...accounts.values()], planObservations: [...observations.values()], findings: [...findings], roots };
+  quota = normalizeQuotaHistory(quota, { now });
+  return { accounts: [...accounts.values()], planObservations: [...observations.values()],
+    quotaObservations: quota.observations, quotaFindings: [...new Set([...quota.findings, ...quota.observations.flatMap(o => o.findings)])],
+    findings: [...findings], roots };
 }
 module.exports = { profileRoots, discoverInventory };

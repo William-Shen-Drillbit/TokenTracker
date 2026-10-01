@@ -11,9 +11,10 @@ const MAX_BYTES = 1_000_000;
 const RETENTION_MS = 90 * 86400_000;
 const GAPS = Object.freeze({
   coverage: "Quota history contains successful observations only; usage and resets between reads may be missed.",
-  backfill: "Historical quota backfill is unavailable; quota history begins with retained observations.",
+  backfill: "Historical quota recovery is limited to metadata in retained Codex logs; missing history is unknown.",
   identity: "Claude quota responses do not identify the account or workspace; those observations remain unassigned.",
-  codexIdentity: "A Codex quota response lacks an account identity; that observation remains unassigned.",
+  codexIdentity: "A Codex quota observation lacks an account identity; that observation remains unassigned.",
+  retained: "Historical Codex quota metadata was recovered from retained logs; observations are sparse and quota drops do not prove a manual or paid reset.",
   units: "Claude extra-usage values retain provider-reported units; no conversion to billed USD is assumed.",
   truncated: "Quota history was truncated by its 90-day, 2000-observation or 1 MB retention limit.",
   invalid: "Some quota observations were invalid and omitted; quota coverage is incomplete.",
@@ -38,7 +39,7 @@ const count = value => Number.isSafeInteger(value) && value >= 0 ? value : null;
 const KINDS = new Set(["five_hour", "seven_day", "seven_day_opus", "weekly_scoped", "primary_window", "secondary_window", "spark_primary_window", "spark_secondary_window"]);
 
 function normalizeObservation(raw) {
-  if (!["anthropic", "openai"].includes(raw?.provider) || raw.source !== "provider-api" || !stamp(raw.observedAt)) return null;
+  if (!["anthropic", "openai"].includes(raw?.provider) || !["provider-api", "retained-log"].includes(raw.source) || !stamp(raw.observedAt)) return null;
   const windows = (Array.isArray(raw.windows) ? raw.windows : []).slice(0, 16).flatMap(w => {
     if (!KINDS.has(w?.kind)) return [];
     const usedPercent = amount(w.usedPercent), resetAt = stamp(w.resetAt);
@@ -62,7 +63,7 @@ function normalizeObservation(raw) {
   if (!windows.length && !creditWindow && !resetCredits && !monetary.length) return null;
   const observation = {
     provider: raw.provider, accountId: digest(raw.accountId), identityId: digest(raw.identityId), organizationId: digest(raw.organizationId),
-    observedAt: stamp(raw.observedAt), source: "provider-api", plan: text(raw.plan), planTier: text(raw.planTier),
+    observedAt: stamp(raw.observedAt), source: raw.source, plan: text(raw.plan), planTier: text(raw.planTier),
     windows, creditWindow, resetCredits, monetary,
     findings: [...new Set((Array.isArray(raw.findings) ? raw.findings : []).filter(f => knownGaps.has(f)))],
   };
@@ -142,6 +143,25 @@ function observationFromLimits(provider, value, { accountId, plan, planTier, obs
   });
 }
 
+// Reuse the existing inventory scan. Log quota metadata carries no verified
+// account identity; today's login, plan, and profile directory cannot supply it.
+function observationFromCodexLog(event) {
+  if (event?.type !== "event_msg") return null;
+  const payload = event.payload?.type === "token_count" ? event.payload : event.payload?.msg;
+  if (payload?.type !== "token_count" || !payload.rate_limits) return null;
+  const limits = payload.rate_limits;
+  const windows = ["primary", "secondary"].flatMap(key => {
+    const w = limits[key];
+    if (!w || typeof w !== "object") return [];
+    const minutes = amount(w.window_minutes);
+    return [{ kind: `${key}_window`, usedPercent: w.used_percent, resetAt: w.resets_at,
+      windowSeconds: minutes !== null && minutes <= Number.MAX_SAFE_INTEGER / 60 ? minutes * 60 : null }];
+  });
+  // credits.balance is neither a billed USD amount nor a count of used resets.
+  return normalizeObservation({ provider: "openai", source: "retained-log", observedAt: event.timestamp,
+    plan: limits.plan_type, windows, findings: [GAPS.retained, GAPS.codexIdentity] });
+}
+
 // Called only with successful live reads. Cached responses never become new observations.
 async function captureQuotaHistory({ home = os.homedir(), dir = path.join(home, ".tokentracker", "team"), claude, codex, codexAccountId, claudePlan, claudeTier, now = new Date().toISOString() } = {}) {
   const config = await readJsonStrict(path.join(dir, "config.json"));
@@ -189,4 +209,4 @@ async function refreshQuotaHistory({ home = os.homedir(), dir = path.join(home, 
   return { ...history, findings: [...new Set([...history.findings, ...findings, ...captured.findings])], status: captured.status };
 }
 
-module.exports = { normalizeQuotaHistory, readQuotaHistory, captureQuotaHistory, refreshQuotaHistory, MAX_OBSERVATIONS, MAX_BYTES };
+module.exports = { observationFromCodexLog, normalizeQuotaHistory, readQuotaHistory, captureQuotaHistory, refreshQuotaHistory, MAX_OBSERVATIONS, MAX_BYTES };
